@@ -13,7 +13,7 @@
 ## Code Style Guidelines
 
 - **Imports**: Use goimports formatting, group stdlib, external, internal packages
-- **Formatting**: Use gofumpt (stricter than gofmt), enabled in golangci-lint
+- **Formatting**: Use gofumpt (stricter than gofmt), enabled in golangci-lint. ALWAYS format any Go code you write. First, try `gofumpt -w .`. If `gofumpt` is not available, use `goimports`. If `goimports` is not available, use `gofmt`. You can also use `task fmt` to run `gofumpt -w .` on the entire project, as long as `gofumpt` is on the `PATH`.
 - **Naming**: Standard Go conventions - PascalCase for exported, camelCase for unexported
 - **Types**: Prefer explicit types, use type aliases for clarity (e.g., `type AgentName string`)
 - **Error handling**: Return errors explicitly, use `fmt.Errorf` for wrapping
