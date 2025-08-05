@@ -50,7 +50,7 @@ manpages/
 completions/
 !internal/tui/components/completions/
 /.opencode
-crush-debug-*-x86_64.pkg.tar.zst
-crush-*-x86_64.pkg.tar.zst
+crush*.tar.gz
+crush*.tar.zst
 pkg/
 src/
