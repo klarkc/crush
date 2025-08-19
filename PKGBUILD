@@ -8,17 +8,13 @@ provides=("${pkgname}")
 conflicts=("${pkgname}")
 vcs=('git')
 
-pkgver=v0.6.3.7.g3a66612a
+pkgver=v0.6.3.8.gcc57ba7f
 
 pkgver() {
   git describe --long --tags | sed 's/\([^-]*-\)-g/\1r/' | sed 's/-/./g'
 }
 
 source=()
-
-prepare() {
-  rsync -a ../ ./
-}
 
 build() {
   go build -o crush .
