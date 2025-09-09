@@ -8,7 +8,7 @@ provides=("${pkgname}")
 conflicts=("${pkgname}")
 vcs=('git')
 
-pkgver=v0.7.2.9.g1809f49c
+pkgver=v0.7.7.12.gf09c71d3
 
 pkgver() {
   git describe --long --tags | sed 's/\([^-]*-\)-g/\1r/' | sed 's/-/./g'
