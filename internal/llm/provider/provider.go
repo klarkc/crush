@@ -24,6 +24,7 @@ const (
 	EventThinkingDelta  EventType = "thinking_delta"
 	EventSignatureDelta EventType = "signature_delta"
 	EventContentStop    EventType = "content_stop"
+	EventToolUseEnd     EventType = "tool_use_end"
 	EventComplete       EventType = "complete"
 	EventError          EventType = "error"
 	EventWarning        EventType = "warning"

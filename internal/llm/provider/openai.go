@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,6 +21,13 @@ import (
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/shared"
+)
+
+var (
+	// qwenToolCallRegex extracts the function name and the entire parameter string.
+	qwenToolCallRegex = regexp.MustCompile(`(?s)<tool_call>\s*<function=(\w+)\s*(.*?)\s*</tool_call>`)
+	// qwenSingleParameterRegex extracts a single parameter name and value.
+	qwenSingleParameterRegex = regexp.MustCompile(`\s*([^=\s]+?)\s*(.*)`)
 )
 
 type openaiClient struct {
@@ -322,8 +330,13 @@ func (o *openaiClient) stream(ctx context.Context, messages []message.Message, t
 
 	attempts := 0
 	eventChan := make(chan ProviderEvent)
+	isQwen := o.isQwenModel()
 
 	go func() {
+		defer close(eventChan)
+		qwenContentBuffer := ""
+		inQwenToolCall := false
+
 		for {
 			attempts++
 			// Kujtim: fixes an issue with anthropig models on openrouter
@@ -359,65 +372,142 @@ func (o *openaiClient) stream(ctx context.Context, messages []message.Message, t
 							}
 						}
 					}
-					if choice.Delta.Content != "" {
-						eventChan <- ProviderEvent{
-							Type:    EventContentDelta,
-							Content: choice.Delta.Content,
-						}
-						currentContent += choice.Delta.Content
-					} else if len(choice.Delta.ToolCalls) > 0 {
-						toolCall := choice.Delta.ToolCalls[0]
-						newToolCall := false
-						if existingToolCall, ok := msgToolCalls[toolCall.Index]; ok { // tool call exists
-							if toolCall.ID != "" && toolCall.ID != existingToolCall.ID {
-								found := false
-								// try to find the tool based on the ID
-								for _, tool := range msgToolCalls {
-									if tool.ID == toolCall.ID {
-										existingToolCall.Function.Arguments += toolCall.Function.Arguments
-										msgToolCalls[toolCall.Index] = existingToolCall
-										toolMap[existingToolCall.ID] = existingToolCall
-										found = true
+					if isQwen {
+						if choice.Delta.Content != "" {
+							qwenContentBuffer += choice.Delta.Content
+							if strings.Contains(qwenContentBuffer, "<tool_call>") {
+								inQwenToolCall = true
+							}
+
+							if inQwenToolCall && strings.Contains(qwenContentBuffer, "</tool_call>") {
+								for {
+									match := qwenToolCallRegex.FindStringSubmatch(qwenContentBuffer)
+									if len(match) == 0 {
+										break
 									}
+
+									functionName := match[1]
+									rawParamsString := match[2]
+
+									paramsMap := make(map[string]string)
+									if functionName == "write" {
+										// Custom parsing for write due to multi-line content and nested parameter syntax
+										parts := strings.SplitN(rawParamsString, "<parameter=file_path>", 2)
+										if len(parts) == 2 {
+											// First part: content
+											contentPart := strings.TrimSpace(strings.TrimPrefix(parts[0], "<parameter=content"))
+											paramsMap["content"] = strings.TrimSpace(contentPart)
+
+											// Second part: file_path
+											filePathPart := strings.TrimSpace(parts[1])
+											paramsMap["file_path"] = strings.TrimSpace(filePathPart)
+										} else {
+											slog.Warn("Qwen write tool call: could not parse content and file_path", "rawParamsString", rawParamsString)
+										}
+									} else {
+										// For other tools like bash, ls, etc.
+										singleParamMatch := qwenSingleParameterRegex.FindStringSubmatch(rawParamsString)
+										if len(singleParamMatch) > 0 {
+											paramsMap[singleParamMatch[1]] = strings.TrimSpace(singleParamMatch[2])
+										} else {
+											slog.Warn("Qwen tool call: could not parse single parameter", "functionName", functionName, "rawParamsString", rawParamsString)
+										}
+									}
+
+									// Convert paramsMap to JSON string for ToolCall.Input
+									inputBytes, _ := json.Marshal(paramsMap)
+									inputJSON := string(inputBytes)
+
+									toolCall := &message.ToolCall{
+										ID:       uuid.NewString(),
+										Name:     functionName,
+										Input:    inputJSON,
+										Finished: false, // Will be marked true on EventComplete for this tool
+									}
+
+									eventChan <- ProviderEvent{
+										Type:     EventToolUseStart,
+										ToolCall: toolCall,
+									}
+									eventChan <- ProviderEvent{
+										Type:     EventToolUseEnd,
+										ToolCall: toolCall,
+									}
+
+									// Remove the processed tool call from the buffer
+									qwenContentBuffer = qwenContentBuffer[len(match[0]):]
 								}
-								if !found {
-									newToolCall = true
+								inQwenToolCall = false
+							} else if !inQwenToolCall && qwenContentBuffer != "" {
+								eventChan <- ProviderEvent{
+									Type:    EventContentDelta,
+									Content: qwenContentBuffer,
+								}
+								currentContent += qwenContentBuffer
+								qwenContentBuffer = ""
+							}
+						}
+					} else {
+						if choice.Delta.Content != "" {
+							eventChan <- ProviderEvent{
+								Type:    EventContentDelta,
+								Content: choice.Delta.Content,
+							}
+							currentContent += choice.Delta.Content
+						} else if len(choice.Delta.ToolCalls) > 0 {
+							toolCall := choice.Delta.ToolCalls[0]
+							newToolCall := false
+							if existingToolCall, ok := msgToolCalls[toolCall.Index]; ok { // tool call exists
+								if toolCall.ID != "" && toolCall.ID != existingToolCall.ID {
+									found := false
+									// try to find the tool based on the ID
+									for _, tool := range msgToolCalls {
+										if tool.ID == toolCall.ID {
+											existingToolCall.Function.Arguments += toolCall.Function.Arguments
+											msgToolCalls[toolCall.Index] = existingToolCall
+											toolMap[existingToolCall.ID] = existingToolCall
+											found = true
+										}
+									}
+									if !found {
+										newToolCall = true
+									}
+								} else {
+									existingToolCall.Function.Arguments += toolCall.Function.Arguments
+									msgToolCalls[toolCall.Index] = existingToolCall
+									toolMap[existingToolCall.ID] = existingToolCall
 								}
 							} else {
-								existingToolCall.Function.Arguments += toolCall.Function.Arguments
-								msgToolCalls[toolCall.Index] = existingToolCall
-								toolMap[existingToolCall.ID] = existingToolCall
+								newToolCall = true
 							}
-						} else {
-							newToolCall = true
+							if newToolCall { // new tool call
+								if toolCall.ID == "" {
+									toolCall.ID = uuid.NewString()
+								}
+								eventChan <- ProviderEvent{
+									Type: EventToolUseStart,
+									ToolCall: &message.ToolCall{
+										ID:       toolCall.ID,
+										Name:     toolCall.Function.Name,
+										Finished: false,
+									},
+								}
+								msgToolCalls[toolCall.Index] = openai.ChatCompletionMessageToolCall{
+									ID:   toolCall.ID,
+									Type: "function",
+									Function: openai.ChatCompletionMessageToolCallFunction{
+										Name:      toolCall.Function.Name,
+										Arguments: toolCall.Function.Arguments,
+									},
+								}
+								toolMap[toolCall.ID] = msgToolCalls[toolCall.Index]
+							}
+							toolCalls := []openai.ChatCompletionMessageToolCall{}
+							for _, tc := range toolMap {
+								toolCalls = append(toolCalls, tc)
+							}
+							acc.Choices[i].Message.ToolCalls = toolCalls
 						}
-						if newToolCall { // new tool call
-							if toolCall.ID == "" {
-								toolCall.ID = uuid.NewString()
-							}
-							eventChan <- ProviderEvent{
-								Type: EventToolUseStart,
-								ToolCall: &message.ToolCall{
-									ID:       toolCall.ID,
-									Name:     toolCall.Function.Name,
-									Finished: false,
-								},
-							}
-							msgToolCalls[toolCall.Index] = openai.ChatCompletionMessageToolCall{
-								ID:   toolCall.ID,
-								Type: "function",
-								Function: openai.ChatCompletionMessageToolCallFunction{
-									Name:      toolCall.Function.Name,
-									Arguments: toolCall.Function.Arguments,
-								},
-							}
-							toolMap[toolCall.ID] = msgToolCalls[toolCall.Index]
-						}
-						toolCalls := []openai.ChatCompletionMessageToolCall{}
-						for _, tc := range toolMap {
-							toolCalls = append(toolCalls, tc)
-						}
-						acc.Choices[i].Message.ToolCalls = toolCalls
 					}
 				}
 			}
@@ -440,10 +530,20 @@ func (o *openaiClient) stream(ctx context.Context, messages []message.Message, t
 				}
 				// Stream completed successfully
 				finishReason := o.finishReason(resultFinishReason)
+
+				if isQwen && qwenContentBuffer != "" {
+					eventChan <- ProviderEvent{
+						Type:    EventContentDelta,
+						Content: qwenContentBuffer,
+					}
+					currentContent += qwenContentBuffer
+					qwenContentBuffer = ""
+				}
+
 				if len(acc.Choices[0].Message.ToolCalls) > 0 {
 					toolCalls = append(toolCalls, o.toolCalls(acc.ChatCompletion)...)
 				}
-				if len(toolCalls) > 0 {
+				if len(toolCalls) > 0 || (isQwen && len(qwenContentBuffer) > 0) { // Check for Qwen tool calls that might be in the buffer
 					finishReason = message.FinishReasonToolUse
 				}
 
@@ -456,7 +556,6 @@ func (o *openaiClient) stream(ctx context.Context, messages []message.Message, t
 						FinishReason: finishReason,
 					},
 				}
-				close(eventChan)
 				return
 			}
 
@@ -464,7 +563,6 @@ func (o *openaiClient) stream(ctx context.Context, messages []message.Message, t
 			retry, after, retryErr := o.shouldRetry(attempts, err)
 			if retryErr != nil {
 				eventChan <- ProviderEvent{Type: EventError, Error: retryErr}
-				close(eventChan)
 				return
 			}
 			if retry {
@@ -475,19 +573,21 @@ func (o *openaiClient) stream(ctx context.Context, messages []message.Message, t
 					if ctx.Err() == nil {
 						eventChan <- ProviderEvent{Type: EventError, Error: ctx.Err()}
 					}
-					close(eventChan)
 					return
 				case <-time.After(time.Duration(after) * time.Millisecond):
 					continue
 				}
 			}
 			eventChan <- ProviderEvent{Type: EventError, Error: retryErr}
-			close(eventChan)
 			return
 		}
 	}()
 
 	return eventChan
+}
+
+func (o *openaiClient) isQwenModel() bool {
+	return strings.Contains(strings.ToLower(o.Model().ID), "qwen")
 }
 
 func (o *openaiClient) shouldRetry(attempts int, err error) (bool, int64, error) {

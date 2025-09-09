@@ -3,12 +3,16 @@
 ## Build/Test/Lint Commands
 
 - **Build**: `go build .` or `go run .`
-- **Test**: `task test` or `go test ./...` (run single test: `go test ./internal/llm/prompt -run TestGetContextFromPaths`)
+- **Test**: `go test ./...` (run single test: `go test ./internal/llm/prompt -run TestGetContextFromPaths`)
 - **Update Golden Files**: `go test ./... -update` (regenerates .golden files when test output changes)
   - Update specific package: `go test ./internal/tui/components/core -update` (in this case, we're updating "core")
-- **Lint**: `task lint-fix`
-- **Format**: `task fmt` (gofumpt -w .)
-- **Dev**: `task dev` (runs with profiling enabled)
+- **Lint**: If `golangci-lint` is installed, `golangci-lint run ./...`
+- **Format**: `gofmt -w .` (If `gofumpt` is available, prefer `gofumpt -w .` then `goimports -w .`)
+- **Dev**: (No direct `task dev` equivalent found in PATH, run `go run .` for development)
+
+**Troubleshooting Build/Format/Test Commands:**
+If `task`, `gofumpt`, `goimports`, or `golangci-lint` are not found, please use their `go` equivalents directly (e.g., `go build .`, `gofmt -w .`, `go test ./...`). These tools are expected to be installed if you are doing Go development.
+
 
 ## Code Style Guidelines
 
